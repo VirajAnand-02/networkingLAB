@@ -1,0 +1,10 @@
+^E:\PROGRAMMING\NETWORKINGLAB\CLAY\CLAY-MAIN\EXAMPLES\CPP-PROJECT-EXAMPLE\CMAKEFILES\D523C7B7C1CD214328948B6F794761B3\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SE:/programming/NetworkingLAB/CLAY/clay-main/examples/cpp-project-example -BE:/programming/NetworkingLAB/CLAY/clay-main/examples/cpp-project-example --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file E:/programming/NetworkingLAB/CLAY/clay-main/examples/cpp-project-example/clay_examples_cpp_project_example.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

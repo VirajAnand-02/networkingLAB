@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="E:\programming\NetworkingLAB\CLAY\clay-main\examples\cpp-project-example\CMakeFiles\d523c7b7c1cd214328948b6f794761b3\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{E4F9CBA2-E626-3022-8AA2-E6D366C35742}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
