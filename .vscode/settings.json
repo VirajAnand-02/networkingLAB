@@ -4,6 +4,8 @@
     "unistd.h": "c",
     "clay.h": "c",
     "stdlib.h": "c",
-    "string.h": "c"
+    "string.h": "c",
+    "cmath": "cpp",
+    "vector": "cpp"
   }
 }
