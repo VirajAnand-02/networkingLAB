@@ -36,11 +36,13 @@ int main() {
     auto pub  = vector<long long>{5, 323};
     auto priv = vector<long long>{173, 323};
 
-    auto cipher = encrypt("Hello World", pub);
+    auto cipher = encrypt("B", pub);
     cout << "Encrypted: \n";
     for (auto c : cipher) cout << ' ' << c;
     cout << endl;
     for (auto c : cipher) cout << ' ' << (char)c;
 
     cout << "\nDecrypted: " << decrypt(cipher, priv) << endl;
+
+    // cout << (modexp(32, 173, 323));
 }

@@ -69,6 +69,8 @@ def diff_manchester(data: str):
     # 0 -> pulse (starting from high) to same (high -> pulse
     #  -> ret high)
     # 1 -> pulse to opposite polarity (high -> pulse -> ret low)
+    # Transition at start if 0
+    # no transition at start if 1
     out_arr = []
     current_state = 1
     
@@ -87,6 +89,9 @@ def diff_manchester(data: str):
     return out_arr, 2
 
 def NRZ_I(data: str):
+    # start foorm high
+    # if 1 -> switch state
+    # if 0 -> state remains same
     out_arr = []
     current_state = 1
     

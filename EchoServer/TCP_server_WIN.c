@@ -18,6 +18,7 @@ char* capitalize(char* text) {
 }
 
 int main() {
+    // Winsock Initialization
     WSADATA wsa;
     SOCKET server_socket, client_socket;
     struct sockaddr_in server, client;
