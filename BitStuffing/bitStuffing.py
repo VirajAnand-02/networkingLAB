@@ -37,6 +37,7 @@ def bit_destuff(stuffed_data):
 def main():
     data = input("Enter the binary data: ").strip()
     flag = input("Enter the flag pattern: ").strip()
+    
 
     stuffed_data = bit_stuff(data)
 

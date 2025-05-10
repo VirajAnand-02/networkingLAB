@@ -68,6 +68,7 @@ int main() {
             printf("recv failed: %d\n", WSAGetLastError());
         } else {
             client_msg[recv_len] = '\0';  // Null-terminate the string
+            
             printf("Received from client: %s\n", client_msg);
             if (strcmp(client_msg, "exit") == 0) {
                 printf("Client disconnected.\n");

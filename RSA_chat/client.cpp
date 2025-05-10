@@ -2,17 +2,15 @@
 // Run:     .\client.exe
 #define _WIN32_WINNT 0x0600
 
-#include <process.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <windows.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
+#include <process.h>   // For _beginthreadex, _endthreadex
+#include <stdio.h>     // For printf, scanf, fgets, fprintf, etc.
+#include <string.h>    // For memset, strlen, strcspn, strcpy
+#include <windows.h>   // For HANDLE, CreateEvent, etc.
+#include <winsock2.h>  // For socket functions
 
-#include <iostream>  // For std::cerr, std::cout (optional)
-#include <string>    // Include C++ string
-#include <vector>    // Include C++ vector
+#include <stdexcept>  // For exception handling
+#include <string>     // Include C++ string
+#include <vector>     // Include C++ vector
 
 // Include our RSA header
 #include "rsa_chat.hpp"
@@ -21,298 +19,411 @@
 
 #define DEFAULT_PORT 8080
 #define DEFAULT_IP "127.0.0.1"
-// Increase buffer size for encrypted messages
-#define BUFFER_SIZE 8192  // Significantly larger
+#define BUFFER_SIZE 8192  // For encrypted messages
 
-// --- Global Variables ---
-volatile bool g_connection_active = false;
-SOCKET g_sock = INVALID_SOCKET;  // Make socket global (use carefully!)
+class ChatClient {
+   private:
+    bool m_connection_active;
+    SOCKET m_sock;
+    std::vector<long long> m_client_public_key;
+    std::vector<long long> m_client_private_key;
+    std::vector<long long> m_server_public_key;
+    HANDLE m_recv_thread;
+    HANDLE m_recv_event;
 
-// Client's own keys (DIFFERENT from server's!)
-// Let's generate a different simple pair: p=13, q=23 => n=299, phi=264. e=7,
-// d=151
-const std::vector<long long> client_public_key = {7, 299};     // {e, n}
-const std::vector<long long> client_private_key = {151, 299};  // {d, n}
+    struct ReceiverThreadArgs {
+        ChatClient* client;
+        HANDLE hEvent;
+    };
 
-// To store the connected server's public key
-std::vector<long long> server_public_key;
+    // Internal methods
+    bool initWinsock();
+    bool createSocket();
+    bool connectToServer(const char* ip, int port);
+    bool exchangeKeys_userID(const char* user_id);
+    bool startReceiver();
+    void messageLoop();
+    void cleanup();
 
-// Structure for thread arguments
-typedef struct {
-    HANDLE hEvent;  // Event to signal completion or error
-} RECEIVER_THREAD_ARGS;
+    // Thread receiver function
+    static unsigned __stdcall receiverThreadFunc(void* args_ptr);
+    void handleReceivedMessage(const std::string& received_msg);
 
-// --- Receiver Thread Function ---
-unsigned __stdcall ClientReceiveThreadFunc(void* args) {
-    RECEIVER_THREAD_ARGS* thread_args = (RECEIVER_THREAD_ARGS*)args;
+   public:
+    ChatClient();
+    ~ChatClient();
+    bool initialize(const char* server_ip, int server_port,
+                    const char* user_id);
+    bool run();
+};
+
+// Constructor initializes member variables
+ChatClient::ChatClient()
+    : m_connection_active(false),
+      m_sock(INVALID_SOCKET),
+      m_client_public_key({7, 299}),     // {e, n} p=13, q=23
+      m_client_private_key({151, 299}),  // {d, n}
+      m_recv_thread(NULL),
+      m_recv_event(NULL) {}
+
+// Destructor ensures cleanup
+ChatClient::~ChatClient() { cleanup(); }
+
+// Initialize Winsock
+bool ChatClient::initWinsock() {
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        fprintf(stderr, "WSAStartup failed. Error: %d\n", WSAGetLastError());
+        return false;
+    }
+    return true;
+}
+
+// Create socket
+bool ChatClient::createSocket() {
+    if ((m_sock = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {
+        fprintf(stderr, "Socket creation failed. Error: %d\n",
+                WSAGetLastError());
+        return false;
+    }
+    return true;
+}
+
+// Connect to server
+bool ChatClient::connectToServer(const char* ip, int port) {
+    struct sockaddr_in server_addr;
+    server_addr.sin_addr.s_addr = inet_addr(ip);
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(port);
+
+    if (server_addr.sin_addr.s_addr == INADDR_NONE) {
+        fprintf(stderr, "Invalid server IP address provided.\n");
+        return false;
+    }
+
+    printf("Connecting to %s:%d...\n", ip, port);
+    if (connect(m_sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) <
+        0) {
+        fprintf(stderr, "Connect failed. Error: %d\n", WSAGetLastError());
+        return false;
+    }
+
+    printf("[System] Connected. Performing key exchange...\n");
+    return true;
+}
+
+// Exchange keys with server
+bool ChatClient::exchangeKeys_userID(const char* user_id) {
+    char comm_buffer[BUFFER_SIZE];
+    m_server_public_key.clear();
+
+    try {
+        memset(comm_buffer, 0, sizeof(comm_buffer));
+        int key_recv_len =
+            recv(m_sock, comm_buffer, sizeof(comm_buffer) - 1, 0);
+        if (key_recv_len <= 0)
+            throw std::runtime_error("Receive server key failed");
+        comm_buffer[key_recv_len] = '\0';
+
+        long long server_e, server_n;
+        if (sscanf(comm_buffer, "%lld %lld", &server_e, &server_n) == 2) {
+            m_server_public_key.assign({server_e, server_n});
+            printf("[System] Server public key received: {e=%lld, n=%lld}\n",
+                   m_server_public_key[0], m_server_public_key[1]);
+        } else
+            throw std::runtime_error("Parse server key failed");
+
+        // Include user_id in the message sent to server
+        snprintf(comm_buffer, sizeof(comm_buffer), "%lld %lld %s",
+                 m_client_public_key[0], m_client_public_key[1], user_id);
+
+        if (send(m_sock, comm_buffer, strlen(comm_buffer), 0) <= 0)
+            throw std::runtime_error("Send client key failed");
+
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[System] Key exchange error: %s. (WSAError: %d)\n",
+                e.what(), WSAGetLastError());
+        return false;
+    }
+
+    printf("[System] Key exchange successful. Chat session started.\n");
+    return true;
+}
+
+// Handle received messages
+void ChatClient::handleReceivedMessage(const std::string& received_serialized) {
+    std::vector<long long> ciphertext =
+        deserialize_ciphertext(received_serialized);
+
+    printf("\n[CRYPTO] Received binary: ");
+    for (size_t i = 0; i < std::min(size_t(10), received_serialized.size());
+         i++) {
+        printf("%02X ", (unsigned char)received_serialized[i]);
+    }
+    if (received_serialized.size() > 10) printf("...");
+
+    printf("\n[CRYPTO] Received string (ASCII): ");
+    for (size_t i = 0; i < std::min(size_t(20), received_serialized.size());
+         i++) {
+        if (isprint(received_serialized[i])) {
+            printf("%c", received_serialized[i]);
+        } else {
+            printf(".");
+        }
+    }
+    if (received_serialized.size() > 20) printf("...");
+    printf("\n");
+
+    if (ciphertext.empty()) {
+        if (received_serialized.empty() || received_serialized == " ") {
+            printf("[Server]: (empty message)\n> ");
+        } else {
+            printf(
+                "[System] Received invalid data (first 50 chars): "
+                "'%.50s'.\n> ",
+                received_serialized.c_str());
+        }
+    } else {
+        std::string decrypted_message =
+            decrypt(ciphertext, m_client_private_key);
+        printf("[CRYPTO] Decrypted message: %s\n\n", decrypted_message.c_str());
+        printf("[Server]: %s\n> ", decrypted_message.c_str());
+    }
+}
+
+// Receiver thread function
+unsigned __stdcall ChatClient::receiverThreadFunc(void* args_ptr) {
+    ReceiverThreadArgs* thread_args = (ReceiverThreadArgs*)args_ptr;
+    ChatClient* client = thread_args->client;
+    HANDLE hEvent = thread_args->hEvent;
+
     char recv_buffer[BUFFER_SIZE];
     int recv_len;
 
-    printf("[Receiver Thread] Started.\n");
-
-    while (g_connection_active) {
+    printf("[Receiver] Thread started.\n");
+    while (client->m_connection_active) {
         memset(recv_buffer, 0, BUFFER_SIZE);
-        recv_len = recv(g_sock, recv_buffer, BUFFER_SIZE - 1, 0);
+        recv_len = recv(client->m_sock, recv_buffer, BUFFER_SIZE - 1, 0);
 
         if (recv_len > 0) {
             recv_buffer[recv_len] = '\0';
             std::string received_serialized(recv_buffer);
-
-            // Display the encrypted string received
-            printf("\n[Received Encrypted]: %s\n", received_serialized.c_str());
-
-            // Deserialize and Decrypt
-            std::vector<long long> ciphertext =
-                deserialize_ciphertext(received_serialized);
-            if (ciphertext.empty() && !received_serialized.empty()) {
-                printf(
-                    "\n[System] Received potentially invalid/empty "
-                    "ciphertext.\n> ");
-                continue;
-            }
-            std::string decrypted_message =
-                decrypt(ciphertext, client_private_key);
-
-            printf("[Decrypted Message]: %s\n> ",
-                   decrypted_message.c_str());  // Print decrypted message
+            client->handleReceivedMessage(received_serialized);
         } else if (recv_len == 0) {
             printf("\n[System] Server disconnected.\n> ");
-            g_connection_active = false;
+            client->m_connection_active = false;
             break;
-        } else {
+        } else {  // recv_len < 0
             int error_code = WSAGetLastError();
-            if (g_connection_active) {  // Avoid error msg if we initiated
-                                        // disconnect
-                if (error_code == WSAECONNRESET ||
-                    error_code == WSAECONNABORTED) {
-                    printf("\n[System] Connection to server lost.\n> ");
-                } else {
-                    fprintf(stderr,
-                            "\n[System] recv failed. Error Code: %d\n> ",
-                            error_code);
-                }
-                g_connection_active = false;
+            if (client->m_connection_active) {
+                printf(
+                    "\n[System] recv failed (Error: %d). Connection lost.\n> ",
+                    error_code);
+                client->m_connection_active = false;
             }
             break;
         }
     }
 
-    printf("[Receiver Thread] Exiting.\n");
-    if (thread_args && thread_args->hEvent)
-        SetEvent(thread_args->hEvent);  // Signal completion
-    free(thread_args);                  // Free arguments
+    printf("[Receiver] Thread exiting.\n");
+    if (hEvent) SetEvent(hEvent);
+    delete thread_args;
     _endthreadex(0);
     return 0;
 }
 
-// --- Main Client Logic ---
-int main() {
-    WSADATA wsa;
-    // sock is now global g_sock
-    struct sockaddr_in server_addr;
-    char server_ip_str[16];
-    int server_port_num;
-    char comm_buffer[BUFFER_SIZE];  // General comm buffer
-
-    // --- Setup --- (Get IP/Port - same as before)
-    printf("Enter server IP address (leave blank for %s): ", DEFAULT_IP);
-    if (fgets(server_ip_str, sizeof(server_ip_str), stdin) != NULL) {
-        server_ip_str[strcspn(server_ip_str, "\n")] = 0;
-        if (server_ip_str[0] == '\0') {
-            strcpy(server_ip_str, DEFAULT_IP);
-            printf("Using default IP: %s\n", server_ip_str);
-        }
-    } else { /* ... error handling ... */
-        return 1;
+// Start receiver thread
+bool ChatClient::startReceiver() {
+    m_recv_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!m_recv_event) {
+        fprintf(stderr, "[System] Failed to create event.\n");
+        return false;
     }
 
-    printf("Enter server port (e.g., %d): ", DEFAULT_PORT);
-    if (scanf("%d", &server_port_num) != 1) {
-        server_port_num = DEFAULT_PORT;
-        fprintf(stderr, "Invalid port. Using default %d.\n", server_port_num);
-    }
-    int c;
-    while ((c = getchar()) != '\n' && c != EOF);  // Consume newline
-
-    // --- Initialize Winsock, Create Socket --- (Same as before)
-    printf("Initialising Winsock...\n");
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { /* ... error handling ... */
-        return 1;
-    }
-    printf("Initialised.\n");
-
-    if ((g_sock = socket(AF_INET, SOCK_STREAM, 0)) ==
-        INVALID_SOCKET) { /* ... error handling ... */
-        WSACleanup();
-        return 1;
-    }
-    printf("Socket created.\n");
-
-    // --- Prepare Server Address --- (Same as before)
-    server_addr.sin_addr.s_addr = inet_addr(server_ip_str);
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(server_port_num);
-    if (server_addr.sin_addr.s_addr ==
-        INADDR_NONE) { /* ... error handling ... */
-        closesocket(g_sock);
-        WSACleanup();
-        return 1;
+    ReceiverThreadArgs* args = new ReceiverThreadArgs();
+    if (!args) {
+        fprintf(stderr, "[System] Thread resource allocation failed.\n");
+        CloseHandle(m_recv_event);
+        m_recv_event = NULL;
+        return false;
     }
 
-    // --- Connect to Server ---
-    printf("Connecting to %s:%d...\n", server_ip_str, server_port_num);
-    if (connect(g_sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) <
-        0) {
-        fprintf(stderr, "Connect failed. Error Code: %d\n", WSAGetLastError());
-        closesocket(g_sock);
-        WSACleanup();
-        return 1;
-    }
-    printf("[System] Connected to server.\n");
-    g_connection_active = true;  // Set flag EARLY before key exchange
-    server_public_key.clear();   // Clear any previous key
+    args->client = this;
+    args->hEvent = m_recv_event;
 
-    // --- Key Exchange ---
-    bool key_exchange_ok = false;
-    try {
-        // 1. Receive Server Public Key {e, n}
-        memset(comm_buffer, 0, sizeof(comm_buffer));
-        int key_recv_len =
-            recv(g_sock, comm_buffer, sizeof(comm_buffer) - 1, 0);
-        if (key_recv_len <= 0) {
-            throw std::runtime_error("Failed to receive server key");
-        }
-        comm_buffer[key_recv_len] = '\0';
-        printf("[System] Received server key string: %s\n", comm_buffer);
-
-        long long server_e, server_n;
-        if (sscanf(comm_buffer, "%lld %lld", &server_e, &server_n) == 2) {
-            server_public_key.push_back(server_e);
-            server_public_key.push_back(server_n);
-            printf("[System] Parsed server key: { e=%lld, n=%lld }\n",
-                   server_public_key[0], server_public_key[1]);
-        } else {
-            throw std::runtime_error("Failed to parse server key string");
-        }
-
-        // 2. Send Client Public Key {e, n}
-        snprintf(comm_buffer, sizeof(comm_buffer), "%lld %lld",
-                 client_public_key[0], client_public_key[1]);
-        printf("[System] Sending client key: %s\n", comm_buffer);
-        if (send(g_sock, comm_buffer, strlen(comm_buffer), 0) <= 0) {
-            throw std::runtime_error("Failed to send client key");
-        }
-
-        key_exchange_ok = true;
-
-    } catch (const std::exception& e) {
-        fprintf(stderr, "[System] Key exchange failed: %s. Error Code: %d\n",
-                e.what(), WSAGetLastError());
-        closesocket(g_sock);
-        g_sock = INVALID_SOCKET;
-        g_connection_active = false;  // Mark inactive
-        WSACleanup();
-        return 1;  // Exit client if key exchange fails
+    m_recv_thread =
+        (HANDLE)_beginthreadex(NULL, 0, &receiverThreadFunc, args, 0, NULL);
+    if (m_recv_thread == NULL) {
+        fprintf(stderr,
+                "[System] Receiver thread creation failed. (Error: %lu)\n",
+                GetLastError());
+        delete args;
+        CloseHandle(m_recv_event);
+        m_recv_event = NULL;
+        return false;
     }
 
-    if (!key_exchange_ok || server_public_key.empty()) {
-        fprintf(stderr, "[System] Key exchange protocol failed logically.\n");
-        closesocket(g_sock);
-        g_sock = INVALID_SOCKET;
-        g_connection_active = false;
-        WSACleanup();
-        return 1;
-    }
-    printf("[System] Key exchange successful. Starting chat session.\n");
+    return true;
+}
 
-    // --- Start Receiver Thread ---
-    HANDLE hRecvEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-    RECEIVER_THREAD_ARGS* args =
-        (RECEIVER_THREAD_ARGS*)malloc(sizeof(RECEIVER_THREAD_ARGS));
-    if (!args || !hRecvEvent) { /* ... handle allocation errors ... */
-        if (hRecvEvent) CloseHandle(hRecvEvent);
-        if (args) free(args);
-        closesocket(g_sock);
-        g_connection_active = false;
-        WSACleanup();
-        return 1;
-    }
-    args->hEvent = hRecvEvent;
-
-    HANDLE hRecvThread = (HANDLE)_beginthreadex(
-        NULL, 0, &ClientReceiveThreadFunc, args, 0, NULL);
-    if (hRecvThread == NULL) { /* ... handle thread creation error ... */
-        CloseHandle(hRecvEvent);
-        free(args);
-        closesocket(g_sock);
-        g_connection_active = false;
-        WSACleanup();
-        return 1;
-    }
-
-    // --- Main Thread: Send Loop ---
+// Main message loop
+void ChatClient::messageLoop() {
+    char comm_buffer[BUFFER_SIZE];
+    printf("Chat commands:\n");
+    printf("- Direct message: userID/your message here\n");
+    printf("- Exit: exit\n");
     printf("> ");
-    std::string line_buffer;
-    while (g_connection_active) {
+
+    while (m_connection_active) {
         if (fgets(comm_buffer, sizeof(comm_buffer), stdin) != NULL) {
             comm_buffer[strcspn(comm_buffer, "\n")] = 0;
             std::string plaintext_message(comm_buffer);
 
-            if (!g_connection_active) break;
+            if (!m_connection_active) break;
 
-            // Encrypt and Serialize
+            if (m_server_public_key.empty()) {
+                printf(
+                    "[System] Server public key not available. Cannot "
+                    "send.\n> ");
+                continue;
+            }
+
             std::vector<long long> ciphertext =
-                encrypt(plaintext_message, server_public_key);
+                encrypt(plaintext_message, m_server_public_key);
             std::string serialized_ciphertext =
                 serialize_ciphertext(ciphertext);
 
-            // Send encrypted message
-            if (send(g_sock, serialized_ciphertext.c_str(),
+            if (send(m_sock, serialized_ciphertext.c_str(),
                      serialized_ciphertext.length(), 0) <= 0) {
-                if (!g_connection_active) { /* Server disconnected concurrently
-                                             */
-                } else {                    /* Handle send error */
-                    fprintf(stderr, "[System] send failed. Error Code: %d\n",
+                if (m_connection_active) {
+                    fprintf(stderr, "[System] send failed. Error: %d\n",
                             WSAGetLastError());
-                    g_connection_active = false;
+                    m_connection_active = false;
                 }
                 break;
             }
 
-            // Check exit condition *after* sending encrypted "exit"
             if (plaintext_message == "exit") {
                 printf("[System] Disconnecting...\n");
-                g_connection_active = false;  // Signal receiver
+                m_connection_active = false;
                 break;
             }
-            printf("> ");  // Re-prompt
+            printf("> ");
         } else {
-            // fgets failed
             printf("\n[System] Console input error/EOF. Disconnecting...\n");
-            g_connection_active = false;
-            // Optionally send encrypted disconnect message?
+            m_connection_active = false;
             break;
         }
-    }  // End sending loop
-
-    // --- Cleanup ---
-    g_connection_active = false;  // Ensure flag is false
-    printf("[System] Shutting down sending side...\n");
-
-    shutdown(g_sock, SD_SEND);  // Signal no more data from client
-
-    printf("[System] Waiting for receiver thread to finish...\n");
-    if (hRecvThread) {
-        WaitForSingleObject(hRecvEvent, 5000);  // Wait up to 5 seconds
-        CloseHandle(hRecvThread);
     }
-    if (hRecvEvent) CloseHandle(hRecvEvent);
+}
 
-    printf("[System] Receiver thread finished.\n");
+// Clean up resources
+void ChatClient::cleanup() {
+    m_connection_active = false;
 
-    closesocket(g_sock);      // Close socket
-    g_sock = INVALID_SOCKET;  // Reset global
-    WSACleanup();             // Cleanup Winsock
+    if (m_sock != INVALID_SOCKET) {
+        shutdown(m_sock, SD_SEND);
+    }
+
+    if (m_recv_thread) {
+        printf("[System] Waiting for receiver thread to finish...\n");
+        if (m_recv_event) {
+            WaitForSingleObject(m_recv_event, 2000);
+        } else {
+            WaitForSingleObject(m_recv_thread, 2000);
+        }
+        CloseHandle(m_recv_thread);
+        m_recv_thread = NULL;
+    }
+
+    if (m_recv_event) {
+        CloseHandle(m_recv_event);
+        m_recv_event = NULL;
+    }
+
+    if (m_sock != INVALID_SOCKET) {
+        closesocket(m_sock);
+        m_sock = INVALID_SOCKET;
+    }
+
+    WSACleanup();
+}
+
+// Initialize the client
+bool ChatClient::initialize(const char* server_ip, int server_port,
+                            const char* user_id) {
+    if (!initWinsock() || !createSocket() ||
+        !connectToServer(server_ip, server_port)) {
+        cleanup();
+        return false;
+    }
+
+    m_connection_active = true;
+
+    if (!exchangeKeys_userID(user_id) || !startReceiver()) {
+        cleanup();
+        return false;
+    }
+
+    return true;
+}
+
+// Run the client
+bool ChatClient::run() {
+    if (!m_connection_active) {
+        printf("[System] Client not initialized properly.\n");
+        return false;
+    }
+
+    messageLoop();
+    cleanup();
     printf("[System] Connection closed.\n");
-    return 0;
+    return true;
+}
+
+// --- Main Client Logic ---
+int main() {
+    char server_ip_str[16];
+    int server_port_num;
+    char clientUserId[32];
+
+    printf("Enter server IP (blank for %s): ", DEFAULT_IP);
+    if (fgets(server_ip_str, sizeof(server_ip_str), stdin) != NULL) {
+        server_ip_str[strcspn(server_ip_str, "\n")] = 0;
+        if (server_ip_str[0] == '\0') strcpy(server_ip_str, DEFAULT_IP);
+    } else {
+        fprintf(stderr, "IP input error.\n");
+        return 1;
+    }
+    printf("Using IP: %s\n", server_ip_str);
+
+    printf("Enter server port (blank for %d): ", DEFAULT_PORT);
+    char port_str[10];
+    if (fgets(port_str, sizeof(port_str), stdin) != NULL) {
+        port_str[strcspn(port_str, "\n")] = 0;
+        if (port_str[0] == '\0' ||
+            sscanf(port_str, "%d", &server_port_num) != 1) {
+            server_port_num = DEFAULT_PORT;
+            printf("Using default port: %d\n", server_port_num);
+        }
+    } else {
+        server_port_num = DEFAULT_PORT;
+        printf("Port input error. Using default: %d\n", server_port_num);
+    }
+
+    printf("Enter userID: ");
+
+    if (fgets(clientUserId, sizeof(clientUserId), stdin) != NULL) {
+        clientUserId[strcspn(clientUserId, "\n")] = 0;
+    } else {
+        fprintf(stderr, "User ID error\n");
+        return 1;
+    }
+
+    ChatClient client;
+    if (!client.initialize(server_ip_str, server_port_num, clientUserId)) {
+        return 1;
+    }
+
+    return client.run() ? 0 : 1;
 }

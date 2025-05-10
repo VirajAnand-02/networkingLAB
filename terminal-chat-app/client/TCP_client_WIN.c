@@ -26,7 +26,7 @@ int main() {
     scanf("%d", &port);
     getchar(); // Consume newline character left by scanf
 
-    printf("Enter your user identifier: ");
+    printf("Enter your user id: ");
     fgets(user_id, sizeof(user_id), stdin);
     user_id[strcspn(user_id, "\n")] = 0; // Remove newline character
 
@@ -51,6 +51,9 @@ int main() {
     }
 
     printf("Connected to server as %s.\n", user_id);
+
+    // send user id
+    send(sock, user_id, strlen(user_id), 0);
 
     while (1) {
         // Allocate memory for the message
