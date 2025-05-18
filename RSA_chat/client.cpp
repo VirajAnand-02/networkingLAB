@@ -21,6 +21,32 @@
 #define DEFAULT_IP "127.0.0.1"
 #define BUFFER_SIZE 8192  // For encrypted messages
 
+// Helper function to log crypto details
+void LogCryptoData(const std::string& received_serialized) {
+    printf("\n[CRYPTO] Received binary (%zu bytes): ",
+           received_serialized.size());
+    // Show up to 32 bytes of hex data with line breaks for readability
+    for (size_t i = 0; i < received_serialized.size(); i++) {
+        printf("%02X ", (unsigned char)received_serialized[i]);
+        // Add a line break every 16 bytes for readability
+        if ((i + 1) % 16 == 0 && i + 1 < received_serialized.size()) {
+            printf("\n                              ");
+        }
+    }
+
+    printf("\n[CRYPTO] Received string (ASCII): ");
+    // Show all data with non-printable characters as dots
+    for (size_t i = 0; i < received_serialized.size(); i++) {
+        printf("%c",
+               isprint(received_serialized[i]) ? received_serialized[i] : '.');
+        // Add a line break every 64 characters for readability
+        if ((i + 1) % 64 == 0 && i + 1 < received_serialized.size()) {
+            printf("\n                              ");
+        }
+    }
+    printf("\n");
+}
+
 class ChatClient {
    private:
     bool m_connection_active;
@@ -91,7 +117,7 @@ bool ChatClient::createSocket() {
 
 // Connect to server
 bool ChatClient::connectToServer(const char* ip, int port) {
-    struct sockaddr_in server_addr;
+    struct sockaddr_in server_addr = {0};
     server_addr.sin_addr.s_addr = inet_addr(ip);
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
@@ -118,6 +144,7 @@ bool ChatClient::exchangeKeys_userID(const char* user_id) {
     m_server_public_key.clear();
 
     try {
+        // Receive server public key
         memset(comm_buffer, 0, sizeof(comm_buffer));
         int key_recv_len =
             recv(m_sock, comm_buffer, sizeof(comm_buffer) - 1, 0);
@@ -133,10 +160,9 @@ bool ChatClient::exchangeKeys_userID(const char* user_id) {
         } else
             throw std::runtime_error("Parse server key failed");
 
-        // Include user_id in the message sent to server
+        // Send client public key with user ID
         snprintf(comm_buffer, sizeof(comm_buffer), "%lld %lld %s",
                  m_client_public_key[0], m_client_public_key[1], user_id);
-
         if (send(m_sock, comm_buffer, strlen(comm_buffer), 0) <= 0)
             throw std::runtime_error("Send client key failed");
 
@@ -152,43 +178,25 @@ bool ChatClient::exchangeKeys_userID(const char* user_id) {
 
 // Handle received messages
 void ChatClient::handleReceivedMessage(const std::string& received_serialized) {
+    // Display crypto debug info
+    LogCryptoData(received_serialized);
+
     std::vector<long long> ciphertext =
         deserialize_ciphertext(received_serialized);
-
-    printf("\n[CRYPTO] Received binary: ");
-    for (size_t i = 0; i < std::min(size_t(10), received_serialized.size());
-         i++) {
-        printf("%02X ", (unsigned char)received_serialized[i]);
-    }
-    if (received_serialized.size() > 10) printf("...");
-
-    printf("\n[CRYPTO] Received string (ASCII): ");
-    for (size_t i = 0; i < std::min(size_t(20), received_serialized.size());
-         i++) {
-        if (isprint(received_serialized[i])) {
-            printf("%c", received_serialized[i]);
-        } else {
-            printf(".");
-        }
-    }
-    if (received_serialized.size() > 20) printf("...");
-    printf("\n");
 
     if (ciphertext.empty()) {
         if (received_serialized.empty() || received_serialized == " ") {
             printf("[Server]: (empty message)\n> ");
         } else {
-            printf(
-                "[System] Received invalid data (first 50 chars): "
-                "'%.50s'.\n> ",
-                received_serialized.c_str());
+            printf("[System] Received invalid data: '%.50s'...\n> ",
+                   received_serialized.c_str());
         }
-    } else {
-        std::string decrypted_message =
-            decrypt(ciphertext, m_client_private_key);
-        printf("[CRYPTO] Decrypted message: %s\n\n", decrypted_message.c_str());
-        printf("[Server]: %s\n> ", decrypted_message.c_str());
+        return;
     }
+
+    std::string decrypted_message = decrypt(ciphertext, m_client_private_key);
+    printf("[CRYPTO] Decrypted message: %s\n\n", decrypted_message.c_str());
+    printf("[Server]: %s\n> ", decrypted_message.c_str());
 }
 
 // Receiver thread function
@@ -288,6 +296,7 @@ void ChatClient::messageLoop() {
                 continue;
             }
 
+            // Encrypt and send the message
             std::vector<long long> ciphertext =
                 encrypt(plaintext_message, m_server_public_key);
             std::string serialized_ciphertext =
@@ -359,7 +368,6 @@ bool ChatClient::initialize(const char* server_ip, int server_port,
     }
 
     m_connection_active = true;
-
     if (!exchangeKeys_userID(user_id) || !startReceiver()) {
         cleanup();
         return false;
@@ -383,47 +391,41 @@ bool ChatClient::run() {
 
 // --- Main Client Logic ---
 int main() {
-    char server_ip_str[16];
-    int server_port_num;
+    char server_ip_str[16] = DEFAULT_IP;
+    int server_port_num = DEFAULT_PORT;
     char clientUserId[32];
 
+    // Get server IP
     printf("Enter server IP (blank for %s): ", DEFAULT_IP);
     if (fgets(server_ip_str, sizeof(server_ip_str), stdin) != NULL) {
         server_ip_str[strcspn(server_ip_str, "\n")] = 0;
         if (server_ip_str[0] == '\0') strcpy(server_ip_str, DEFAULT_IP);
-    } else {
-        fprintf(stderr, "IP input error.\n");
-        return 1;
     }
     printf("Using IP: %s\n", server_ip_str);
 
+    // Get server port
     printf("Enter server port (blank for %d): ", DEFAULT_PORT);
     char port_str[10];
     if (fgets(port_str, sizeof(port_str), stdin) != NULL) {
         port_str[strcspn(port_str, "\n")] = 0;
-        if (port_str[0] == '\0' ||
-            sscanf(port_str, "%d", &server_port_num) != 1) {
-            server_port_num = DEFAULT_PORT;
-            printf("Using default port: %d\n", server_port_num);
+        if (port_str[0] != '\0' &&
+            sscanf(port_str, "%d", &server_port_num) == 1) {
+            // Port was successfully parsed
         }
-    } else {
-        server_port_num = DEFAULT_PORT;
-        printf("Port input error. Using default: %d\n", server_port_num);
     }
+    printf("Using port: %d\n", server_port_num);
 
+    // Get user ID
     printf("Enter userID: ");
-
-    if (fgets(clientUserId, sizeof(clientUserId), stdin) != NULL) {
-        clientUserId[strcspn(clientUserId, "\n")] = 0;
-    } else {
+    if (fgets(clientUserId, sizeof(clientUserId), stdin) == NULL) {
         fprintf(stderr, "User ID error\n");
         return 1;
     }
+    clientUserId[strcspn(clientUserId, "\n")] = 0;
 
+    // Connect and run client
     ChatClient client;
-    if (!client.initialize(server_ip_str, server_port_num, clientUserId)) {
-        return 1;
-    }
-
-    return client.run() ? 0 : 1;
+    return client.initialize(server_ip_str, server_port_num, clientUserId)
+               ? (client.run() ? 0 : 1)
+               : 1;
 }
