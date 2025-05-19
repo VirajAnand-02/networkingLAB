@@ -51,6 +51,8 @@
     "sstream": "cpp",
     "streambuf": "cpp",
     "thread": "cpp",
-    "typeinfo": "cpp"
+    "typeinfo": "cpp",
+    "stdio.h": "c",
+    "process.h": "c"
   }
 }
